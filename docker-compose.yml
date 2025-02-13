@@ -1,0 +1,161 @@
+services:
+  zookeeper:
+    image: bitnami/zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    networks:
+      - kafkanet
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    volumes:
+      - zookeeper_data:/bitnami/zookeeper
+    healthcheck:
+      test: [ "CMD", "echo", "ruok", "|", "nc", "localhost", "2181" ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  kafka-0:
+    image: bitnami/kafka
+    container_name: kafka-0
+    expose:
+      - 9092
+    ports:
+      - "29092:29092"
+    networks:
+      - kafkanet
+    environment:
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_CFG_BROKER_ID=0
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CFG_LISTENERS=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=INTERNAL://kafka-0:9092,EXTERNAL://localhost:29092
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=INTERNAL
+    volumes:
+      - kafka_0_data:/bitnami/kafka
+    depends_on:
+      - zookeeper
+    healthcheck:
+      test: [ "CMD", "kafka-topics.sh", "--bootstrap-server", "kafka-0:9092", "--list" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:latest
+    container_name: redis-server
+    ports:
+      - "6379:6379"
+    networks:
+      - kafkanet
+    volumes:
+      - redis_data:/data
+    command: [ "redis-server", "--appendonly", "yes" ]
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+      timeout: 5s
+
+  postgres:
+    image: postgres:15
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: userdb
+    ports:
+      - "5432:5432"
+    networks:
+      - kafkanet
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+#      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka_producer:
+    build: .
+    container_name: kafka_producer
+    environment:
+      BOOTSTRAP_SERVERS: "kafka-0:9092"
+      KAFKA_TOPIC: "sample_topic"
+      MESSAGE_COUNT: 20
+      REDIS_HOST: "redis"
+      REDIS_PORT: 6379
+      POSTGRES_HOST: "postgres"
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+      POSTGRES_DB: "userdb"
+    depends_on:
+      kafka-0:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - kafkanet
+
+  spark-master:
+      image: bde2020/spark-master:3.1.1-hadoop3.2
+      container_name: spark-master
+      ports:
+        - "7077:7077"  # Spark Master Port
+        - "8080:8080"  # Spark Master UI
+      environment:
+        - SPARK_MODE=master
+      volumes:
+        - ./app:/app/
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8080"]
+        interval: 10s
+        timeout: 5s
+        retries: 3
+        start_period: 30s  # Allow extra time for Spark master to start
+      networks:
+        - kafkanet
+
+  spark-worker:
+    image: bde2020/spark-worker:3.1.1-hadoop3.2
+    container_name: spark-worker
+    ports:
+      - "8081:8081"  # Spark Worker UI
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - SPARK_WORKER_CORES=4
+      - SPARK_WORKER_MEMORY=4g
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s  # Allow extra time for Spark worker to connect
+    networks:
+      - kafkanet
+
+
+networks:
+  kafkanet:
+    driver: bridge
+
+volumes:
+  zookeeper_data:
+    driver: local
+  kafka_0_data:
+    driver: local
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local
